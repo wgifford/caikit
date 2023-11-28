@@ -15,7 +15,7 @@
 
 # Standard
 from datetime import datetime
-from typing import Any, Iterable, List, Union
+from typing import Any, Iterable, Union
 
 # Third Party
 import numpy as np
@@ -23,23 +23,6 @@ import pandas as pd
 
 # Local
 from ..toolkit.optional_dependencies import HAVE_PYSPARK, pyspark
-
-
-def mock_pd_groupby(a_df_like, by: List[str], return_pandas_api=False):
-    """Roughly mocks the behavior of pandas groupBy but on a spark dataframe."""
-
-    distinct_keys = a_df_like.select(by).distinct().collect()
-    for dkey in distinct_keys:
-        adict = dkey.asDict()
-        filter_statement = ""
-        for k, v in adict.items():
-            filter_statement += f" {k} == '{v}' and"
-        if filter_statement.endswith("and"):
-            filter_statement = filter_statement[0:-3]
-        sub_df = a_df_like.filter(filter_statement)
-        value = tuple(adict.values())
-        value = value[0] if len(value) == 1 else value
-        yield value, sub_df.pandas_api() if return_pandas_api else sub_df
 
 
 def timezoneoffset(adatetime: datetime) -> int:
@@ -142,11 +125,12 @@ def iteritems_workaround(series: Any, force_list: bool = False) -> Iterable:
         return series
 
     # handle an edge case of pyspark.ml.linalg.DenseVector
-    if HAVE_PYSPARK:
-        if isinstance(series, pyspark.pandas.series.Series) and isinstance(
-            series[0], pyspark.ml.linalg.Vector
-        ):
-            return [x.toArray().tolist() for x in series.to_numpy()]
+    if (
+        HAVE_PYSPARK
+        and isinstance(series, pyspark.pandas.series.Series)
+        and isinstance(series[0], pyspark.ml.linalg.Vector)
+    ):
+        return [x.toArray().tolist() for x in series.to_numpy()]
 
     # note that we're forcing a list only if we're not
     # a native pandas series
@@ -155,5 +139,5 @@ def iteritems_workaround(series: Any, force_list: bool = False) -> Iterable:
 
     try:
         return series.to_numpy()
-    except:  # pylint: disable=bare-except
+    except:  # noqa: E722
         return series.to_list()

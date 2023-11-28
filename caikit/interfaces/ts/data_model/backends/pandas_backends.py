@@ -17,11 +17,10 @@ Core data model backends backed by pandas
 
 # Standard
 from datetime import datetime
-from typing import Any, Iterable, Optional, Tuple, Type, Union
+from typing import TYPE_CHECKING, Any, Iterable, Optional, Tuple, Type, Union
 import json
 
 # Third Party
-# TODO: make pandas and numpy non-optional elsewhere!
 from pandas import RangeIndex
 import numpy as np
 import pandas as pd
@@ -32,6 +31,7 @@ import alog
 # Local
 from .....core.data_model import DataBase, ProducerId
 from .....core.exceptions import error_handler
+from ... import data_model as dm
 from .. import time_types
 from ..toolkit.optional_dependencies import HAVE_PYSPARK
 from .base import (
@@ -41,7 +41,10 @@ from .base import (
     UncachedBackendMixin,
 )
 from .util import iteritems_workaround, pd_timestamp_to_seconds
-import caikit.interfaces.ts.data_model as dm
+
+if TYPE_CHECKING:
+    # Local
+    from ..timeseries import TimeSeries
 
 log = alog.use_channel("PDBCK")
 error = error_handler.get(log)
@@ -55,36 +58,36 @@ class PandasMultiTimeSeriesBackend(MultiTimeSeriesBackendBase):
         self,
         data_frame: pd.DataFrame,
         key_column: Union[Iterable[str], str],
-        timestamp_column: str = None,
+        timestamp_column: Optional[str] = None,
         value_columns: Optional[Iterable[str]] = None,
         ids: Optional[Union[Iterable[int], Iterable[str]]] = None,
         producer_id: Optional[Union[Tuple[str, str], ProducerId]] = None,
     ):
-        error.type_check("<COR81128380F>", pd.DataFrame, data_frame=data_frame)
+        error.type_check("<COR81128390E>", pd.DataFrame, data_frame=data_frame)
         error.type_check(
-            "<COR81128381F>",
+            "<COR81128391E>",
             list,
             str,
             key_column=key_column,
         )
         error.type_check(
-            "<COR81128382F>", str, int, type(None), timestamp_column=timestamp_column
+            "<COR81128392E>", str, int, type(None), timestamp_column=timestamp_column
         )
         error.type_check_all(
-            "<COR81128383F>",
+            "<COR81128393E>",
             str,
             int,
             allow_none=True,
             value_columns=value_columns,
         )
         error.type_check_all(
-            "<COR81128384F>",
+            "<COR81128394E>",
             str,
             allow_none=True,
             ids=ids,
         )
         error.type_check(
-            "<COR81128385F>",
+            "<COR81128395E>",
             tuple,
             ProducerId,
             allow_none=True,
@@ -93,7 +96,7 @@ class PandasMultiTimeSeriesBackend(MultiTimeSeriesBackendBase):
 
         # Validate the column names
         error.value_check(
-            "<COR04942286F>",
+            "<COR04942296E>",
             (timestamp_column is None or (timestamp_column in data_frame.columns)),
             "Invalid timestamp column/index: {}",
             timestamp_column,
@@ -115,20 +118,18 @@ class PandasMultiTimeSeriesBackend(MultiTimeSeriesBackendBase):
             if isinstance(producer_id, ProducerId)
             else (ProducerId(*producer_id) if producer_id is not None else None)
         )
+        self._timeseries = None
+        self._key_columns = (
+            [self._key_column]
+            if isinstance(self._key_column, str)
+            else self._key_column
+        )
 
-    def get_attribute(
-        self, data_model_class: Type["MultiTimeSeries"], name: str
-    ) -> Any:
-        # pylint: disable=duplicate-code
-        if isinstance(self._key_column, str):
-            key_columns = [self._key_column]
-        else:
-            key_columns = self._key_column
-
+    def get_attribute(self, data_model_class: Type["TimeSeries"], name: str) -> Any:
         if name == "timeseries":
             result = []
 
-            if len(key_columns) == 0:
+            if len(self._key_columns) == 0:
                 backend = PandasTimeSeriesBackend(
                     self._df,
                     timestamp_column=self._timestamp_column,
@@ -137,7 +138,9 @@ class PandasMultiTimeSeriesBackend(MultiTimeSeriesBackendBase):
                 result.append(dm.SingleTimeSeries(_backend=backend))
             else:
                 for k, k_df in self._df.groupby(
-                    key_columns if len(key_columns) > 1 else key_columns[0]
+                    self._key_columns
+                    if len(self._key_columns) > 1
+                    else self._key_columns[0]
                 ):
                     # if it is a single key string, we want to just wrap it in a list
                     if isinstance(k, (str, int)):
@@ -153,7 +156,7 @@ class PandasMultiTimeSeriesBackend(MultiTimeSeriesBackendBase):
             return result
 
         if name == "id_labels":
-            return key_columns
+            return self._key_columns
 
         # If requesting producer_id or ids, just return the stored value
         if name == "producer_id":
@@ -235,12 +238,12 @@ class PandasTimeSeriesBackend(TimeSeriesBackendBase):
     # pylint: disable=too-many-return-statements
     def get_attribute(
         self,
-        data_model_class: Type["TimeSeries"],
+        data_model_class: Type["dm.SingleTimeSeries"],
         name: str,
         external_df: pd.DataFrame = None,
     ) -> Any:
         """When fetching a data attribute from the timeseries, this aliases to
-        the appropriate set of packend wrappers for the various fields.
+        the appropriate set of backend wrappers for the various fields.
         """
 
         # use the external definition of our pandas-like dataframe if
@@ -250,19 +253,17 @@ class PandasTimeSeriesBackend(TimeSeriesBackendBase):
         if name == "timestamp_label":
             return self._timestamp_column
 
-        if name == "ids":
-            if self._ids is not None and len(self._ids) != 0:
-                if isinstance(self._ids[0], (np.int_, int)):
-                    val = data_model_class.IntIDSequence(
-                        values=[
-                            id.item() if isinstance(id, np.int_) else id
-                            for id in self._ids
-                        ]
-                    )
-                    return DataBase.OneofFieldVal(val=val, which_oneof="id_int")
-                if isinstance(self._ids[0], str):
-                    val = data_model_class.StringIDSequence(values=self._ids)
-                    return DataBase.OneofFieldVal(val=val, which_oneof="id_str")
+        if name == "ids" and self._ids is not None and len(self._ids) != 0:
+            if isinstance(self._ids[0], (np.int_, int)):
+                val = data_model_class.IntIDSequence(
+                    values=[
+                        id.item() if isinstance(id, np.int_) else id for id in self._ids
+                    ]
+                )
+                return DataBase.OneofFieldVal(val=val, which_oneof="id_int")
+            if isinstance(self._ids[0], str):
+                val = data_model_class.StringIDSequence(values=self._ids)
+                return DataBase.OneofFieldVal(val=val, which_oneof="id_str")
 
         # If requesting the value_labels, this is the value column names
         if name == "value_labels":
@@ -331,8 +332,6 @@ class PandasValueSequenceBackend(UncachedBackendMixin, StrictFieldBackendMixin):
         # pylint: disable=import-outside-toplevel
         from pyspark.ml.linalg import Vector as SVector
 
-        # import pyspark
-
         _DEFAULT_VECTOR_TYPES.append(SVector)
 
     def __init__(self, data_frame: pd.Series, col_name: str):
@@ -380,16 +379,20 @@ class PandasValueSequenceBackend(UncachedBackendMixin, StrictFieldBackendMixin):
 
         if name == "sequence":
             name = self._valid_oneof
-        if name in ["val_int", "val_float", "val_str", "val_vector"]:
-            if name == self._valid_oneof:
-                return self._sequence_type(
-                    values=[
-                        self._converter(val)
-                        for val in iteritems_workaround(
-                            self._df[self._col_name], force_list=True
-                        )
-                    ],
-                )
+        if name == self._valid_oneof and name in [
+            "val_int",
+            "val_float",
+            "val_str",
+            "val_vector",
+        ]:
+            return self._sequence_type(
+                values=[
+                    self._converter(val)
+                    for val in iteritems_workaround(
+                        self._df[self._col_name], force_list=True
+                    )
+                ],
+            )
         if name == self._valid_oneof == "val_any":
             return self._sequence_type(
                 values=[
@@ -446,8 +449,7 @@ class PandasPeriodicTimeSequenceBackend(UncachedBackendMixin, StrictFieldBackend
             return time_types.TimeDuration(dt_str=self._period_length)
 
         # Delegate to common parent logic
-        # This seems unreachable???
-        # return super().get_attribute(data_model_class, name)
+        return super().get_attribute(data_model_class, name)
 
 
 class PandasPointTimeSequenceBackend(
@@ -477,8 +479,7 @@ class PandasPointTimeSequenceBackend(
             ]
 
         # Delegate to common parent logic
-        # This seems unreachable???
-        # return super().get_attribute(data_model_class, name)
+        return super().get_attribute(data_model_class, name)
 
 
 class PandasTimePointBackend(UncachedBackendMixin, StrictFieldBackendMixin):
