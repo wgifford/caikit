@@ -18,7 +18,8 @@ Tests for the caikit HTTP server
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List, Optional
+import base64
 import json
 import os
 import signal
@@ -90,6 +91,8 @@ def generate_tls_configs(
     mtls: bool = False,
     inline: bool = False,
     separate_client_ca: bool = False,
+    server_sans: Optional[List[str]] = None,
+    client_sans: Optional[List[str]] = None,
     **http_config_overrides,
 ) -> Dict[str, Dict]:
     """Helper to generate tls configs"""
@@ -97,11 +100,14 @@ def generate_tls_configs(
         config_overrides = {}
         client_keyfile, client_certfile = None, None
         ca_cert, server_cert, server_key = None, None, None
+        use_in_test = config_overrides.setdefault("use_in_test", {})
+        use_in_test["workdir"] = workdir
         if mtls or tls:
             ca_key = tls_test_tools.generate_key()[0]
             ca_cert = tls_test_tools.generate_ca_cert(ca_key)
             server_key, server_cert = tls_test_tools.generate_derived_key_cert_pair(
-                ca_key=ca_key
+                ca_key=ca_key,
+                san_list=server_sans,
             )
             server_certfile, server_keyfile = save_key_cert_pair(
                 "server", workdir, server_key, server_cert
@@ -121,11 +127,9 @@ def generate_tls_configs(
             # need to save this ca_certfile in config_overrides so the tls
             # tests below can access it from client side
             ca_certfile, _ = save_key_cert_pair("ca", workdir, cert=ca_cert)
-            config_overrides["use_in_test"] = {
-                "ca_cert": ca_certfile,
-                "server_key": server_keyfile,
-                "server_cert": server_certfile,
-            }
+            use_in_test["ca_cert"] = ca_certfile
+            use_in_test["server_key"] = server_keyfile
+            use_in_test["server_cert"] = server_certfile
 
             # also saving a bad ca_certfile for a failure test case
             bad_ca_file = os.path.join(workdir, "bad_ca_cert.crt")
@@ -134,7 +138,7 @@ def generate_tls_configs(
                     "-----BEGIN CERTIFICATE-----\nfoobar\n-----END CERTIFICATE-----"
                 )
                 handle.write(bad_cert)
-            config_overrides["use_in_test"]["bad_ca_cert"] = bad_ca_file
+            use_in_test["bad_ca_cert"] = bad_ca_file
 
             if mtls:
                 if separate_client_ca:
@@ -163,12 +167,13 @@ def generate_tls_configs(
                     workdir,
                     *tls_test_tools.generate_derived_key_cert_pair(
                         ca_key=client_ca_key,
+                        san_list=client_sans,
                         **subject_kwargs,
                     ),
                 )
                 # need to save the client cert and key in config_overrides so the mtls test below can access it
-                config_overrides["use_in_test"]["client_cert"] = client_certfile
-                config_overrides["use_in_test"]["client_key"] = client_keyfile
+                use_in_test["client_cert"] = client_certfile
+                use_in_test["client_key"] = client_keyfile
 
             config_overrides["runtime"] = {"tls": tls_config.to_dict()}
         config_overrides.setdefault("runtime", {})["http"] = {
@@ -480,6 +485,20 @@ def test_inference_other_task(other_task_model_id, client):
     assert json_response["farewell"] == "goodbye: world 42 times"
 
 
+def test_inference_no_aborter(other_task_model_id, client):
+    """Simple check that we can ping a model"""
+    with temp_config(
+        {"runtime": {"use_abortable_threads": False}}, merge_strategy="merge"
+    ):
+        json_input = {"model_id": other_task_model_id, "inputs": {"name": "world"}}
+        response = client.post(
+            f"/api/v1/task/other",
+            json=json_input,
+        )
+        json_response = json.loads(response.content.decode(response.default_encoding))
+        assert response.status_code == 200, json_response
+
+
 def test_output_file_task(file_task_model_id, client):
     """Simple check that we can get a file output"""
     # cGRmZGF0Yf//AA== is b"pdfdata\xff\xff\x00" base64 encoded
@@ -623,6 +642,41 @@ def test_inference_streaming_sample_module_actual_server_throws(
         assert stream_responses[1].get("code") == 400
 
 
+def test_inference_malformed_param(client):
+    """Send a malformed data parameter field to the inference call to induce the correct HTTP error"""
+
+    response = client.post(
+        "/api/v1/task/sample",
+        data='{"bad_input": 100,}',  # send intentionally bad json
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 422
+
+    json_response = json.loads(response.content.decode(response.default_encoding))
+
+    assert "Invalid JSON" in json_response["details"]
+    assert json_response["additional_info"][0]["type"] == "json_invalid"
+
+
+def test_inference_non_serializable_json(client):
+    """Send non_serializable json as the data parameter field to the inference call to test correct error handling"""
+
+    byte_data = bytes([1, 2, 3, 4, 5])
+    base64_data = base64.b64encode(byte_data)
+
+    response = client.post(
+        "/api/v1/task/sample",
+        data=base64_data,  # send byte object
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 422
+
+    json_response = json.loads(response.content.decode(response.default_encoding))
+
+    assert "Invalid JSON" in json_response["details"]
+    assert json_response["additional_info"][0]["type"] == "json_invalid"
+
+
 def test_no_model_id(client):
     """Simple check to make sure we return a 400 if no model_id in payload"""
     response = client.post(
@@ -701,8 +755,7 @@ def test_model_not_found_with_lazy_load_multi_model_finder(open_port):
 
 
 def test_inference_sample_task_incorrect_input(sample_task_model_id, client):
-    """Test that with an incorrect input, the test doesn't throw but
-    instead returns None"""
+    """Test that with an incorrect input, we get back a 422"""
     json_input = {
         "model_id": sample_task_model_id,
         "inputs": {"blah": "world"},
@@ -711,9 +764,13 @@ def test_inference_sample_task_incorrect_input(sample_task_model_id, client):
         f"/api/v1/task/sample",
         json=json_input,
     )
-    assert response.status_code == 422, response.content.decode(
-        response.default_encoding
-    )
+    assert response.status_code == 422
+    json_response = json.loads(response.content.decode(response.default_encoding))
+    # assert standard fields in the response
+    assert json_response["details"] is not None
+    assert json_response["code"] is not None
+    assert json_response["id"] is not None
+    assert json_response["details"] == "Extra inputs are not permitted"
 
 
 @pytest.mark.skip("Skipping since we're not tacking forward compatibility atm")
@@ -780,6 +837,27 @@ def test_runtime_info_ok_response_all_packages(runtime_http_server):
             # dependent libraries versions added
             assert "alog" in json_response["python_packages"]
             assert "py_to_proto" in json_response["python_packages"]
+
+
+def test_runtime_info_ok_custom_python_packages(runtime_http_server):
+    """Make sure the runtime info returns version data"""
+    with temp_config(
+        {"runtime": {"version_info": {"python_packages": {"custom_package": "0.1.0"}}}},
+        merge_strategy="merge",
+    ):
+        with TestClient(runtime_http_server.app) as client:
+            response = client.get(http_server.RUNTIME_INFO_ENDPOINT)
+            assert response.status_code == 200
+
+            json_response = json.loads(
+                response.content.decode(response.default_encoding)
+            )
+            # runtime_version not added if not set
+            assert json_response["runtime_version"] == ""
+            # custom library is set while other random packages are not
+            assert "caikit" in json_response["python_packages"]
+            assert json_response["python_packages"]["custom_package"] == "0.1.0"
+            assert "py_to_proto" not in json_response["python_packages"]
 
 
 def test_http_server_shutdown_with_model_poll(open_port):

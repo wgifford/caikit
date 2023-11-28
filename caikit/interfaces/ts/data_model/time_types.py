@@ -41,7 +41,7 @@ class Seconds(DataObjectBase):
     timedelta
     """
 
-    seconds: float
+    seconds: Annotated[float, FieldNumber(1)]
 
     def as_datetime(self) -> datetime:
         """Return a python datetime object.
@@ -61,9 +61,6 @@ class Seconds(DataObjectBase):
     def from_timedelta(cls, time_delta: timedelta) -> "Seconds":
         """Create a Seconds from a timedelta"""
         return cls(seconds=time_delta.total_seconds())
-
-    def to_dict(self) -> dict:
-        return {"seconds": self.seconds}
 
 
 @dataobject(package=TS_PACKAGE)
@@ -99,8 +96,8 @@ class PeriodicTimeSequence(DataObjectBase):
     occur at a regular period
     """
 
-    start_time: TimePoint
-    period_length: TimeDuration
+    start_time: Annotated[TimePoint, FieldNumber(1)]
+    period_length: Annotated[TimeDuration, FieldNumber(2)]
 
 
 @dataobject(package=TS_PACKAGE)
@@ -109,14 +106,14 @@ class PointTimeSequence(DataObjectBase):
     or may not be evenly distributed in time
     """
 
-    points: List[TimePoint]
+    points: Annotated[List[TimePoint], FieldNumber(1)]
 
 
 @dataobject(package=TS_PACKAGE)
 class Vector(DataObjectBase):
     """A vector represents a finite sequence of doubles"""
 
-    data: List[float]
+    data: Annotated[List[float], FieldNumber(1)]
 
 
 @dataobject(package=TS_PACKAGE)
@@ -130,25 +127,25 @@ class ValueSequence(DataObjectBase):
     class IntValueSequence(DataObjectBase):
         """Nested value sequence of integers"""
 
-        values: List[int]
+        values: Annotated[List[int], FieldNumber(1)]
 
     @dataobject(package=TS_PACKAGE)
     class FloatValueSequence(DataObjectBase):
         """Nested value sequence of floats"""
 
-        values: List[float]
+        values: Annotated[List[float], FieldNumber(1)]
 
     @dataobject(package=TS_PACKAGE)
     class StrValueSequence(DataObjectBase):
         """Nested value sequence of strings"""
 
-        values: List[str]
+        values: Annotated[List[str], FieldNumber(1)]
 
     @dataobject(package=TS_PACKAGE)
     class VectorValueSequence(DataObjectBase):
         """Nested value sequence of vectors"""
 
-        values: List[Vector]
+        values: Annotated[List[Vector], FieldNumber(1)]
 
         def _convert_np_to_list(self, v):
             v = v.tolist()
@@ -157,20 +154,12 @@ class ValueSequence(DataObjectBase):
         def to_dict(self):
             result = []
             for v in self.values:
-                if isinstance(v, np.ndarray):
-                    v_in = self._convert_np_to_list(v)
-                # we don't create these at the application leve
-                # It should emerge only from to/from_proto invocations
-                # elif isinstance(v, Vector):
-                #    v_in = v.data
-                else:
-                    v_in = v
-
+                v_in = self._convert_np_to_list(v) if isinstance(v, np.ndarray) else v
                 result.append({"data": v_in if isinstance(v_in, list) else v.data})
             return {"values": result}
 
         def fill_proto(self, proto):
-            subproto = getattr(proto, "values")
+            subproto = proto.values
             subproto.extend(
                 [
                     Vector.from_json(
@@ -193,7 +182,7 @@ class ValueSequence(DataObjectBase):
     class TimePointSequence(DataObjectBase):
         """Nested value sequence of TimePoints"""
 
-        values: List[str]
+        values: Annotated[List[str], FieldNumber(1)]
 
         def to_dict(self):
             result = []
@@ -202,7 +191,7 @@ class ValueSequence(DataObjectBase):
             return {"values": result}
 
         def fill_proto(self, proto):
-            subproto = getattr(proto, "values")
+            subproto = proto.values
             subproto.extend(list(self.values))
 
         @classmethod
@@ -214,7 +203,7 @@ class ValueSequence(DataObjectBase):
     class AnyValueSequence(DataObjectBase):
         """Nested value sequence of Any objects"""
 
-        values: List[str]
+        values: Annotated[List[str], FieldNumber(1)]
 
         def to_dict(self):
             result = []
@@ -224,7 +213,7 @@ class ValueSequence(DataObjectBase):
             return {"values": result}
 
         def fill_proto(self, proto):
-            subproto = getattr(proto, "values")
+            subproto = proto.values
             subproto.extend([json.loads(v) for v in self.values])
 
         @classmethod

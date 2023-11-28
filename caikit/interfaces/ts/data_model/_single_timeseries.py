@@ -16,7 +16,7 @@ The core data model object for a TimeSeries
 """
 # Standard
 from datetime import timedelta
-from typing import Iterable, List, Tuple, Union
+from typing import Iterable, List, Optional, Tuple, Union
 import json
 
 # Third Party
@@ -61,28 +61,28 @@ class SingleTimeSeries(DataObjectBase):
     class StringIDSequence(DataObjectBase):
         """Nested value sequence of strings"""
 
-        values: List[str]
+        values: Annotated[List[str], FieldNumber(1)]
 
     @dataobject(package=TS_PACKAGE)
     class IntIDSequence(DataObjectBase):
         """Nested value sequence of ints"""
 
-        values: List[int]
+        values: Annotated[List[int], FieldNumber(1)]
 
     time_sequence: Union[
         Annotated[PeriodicTimeSequence, OneofField("time_period"), FieldNumber(10)],
         Annotated[PointTimeSequence, OneofField("time_points"), FieldNumber(20)],
     ]
-    values: List[ValueSequence]
-    timestamp_label: str
-    value_labels: List[str]
+    values: Annotated[List[ValueSequence], FieldNumber(1)]
+    timestamp_label: Annotated[str, FieldNumber(2)]
+    value_labels: Annotated[List[str], FieldNumber(3)]
     ids: Union[
         Annotated[IntIDSequence, OneofField("id_int"), FieldNumber(30)],
         Annotated[StringIDSequence, OneofField("id_str"), FieldNumber(40)],
     ]
 
     _DEFAULT_TS_COL = "timestamp"
-    _private_slots = ("_which_oneof_time_sequence", "_which_oneof_ids")
+    # _private_slots = ("_which_oneof_time_sequence", "_which_oneof_ids")
 
     # TODO: We need to clean up the init semantics
     def __init__(self, *args, **kwargs):
@@ -90,8 +90,8 @@ class SingleTimeSeries(DataObjectBase):
         backend
         """
         # this is called from MultiTimeSeries
-        if "_backend" in kwargs:
-            self._backend = kwargs["_backend"]
+        if backend := kwargs.get("_backend", None):
+            self._backend = backend
         elif "values" in kwargs:
             self._ids = None
             if "id_int" in kwargs:
@@ -165,18 +165,9 @@ class SingleTimeSeries(DataObjectBase):
         num_rows = list(col_lens)[0]
         log.debug("Num rows: %d", num_rows)
 
-        # todo not sure if this is needed here, is it even possible without making changes to the
-        # json?
-        # error.value_check(
-        #     "<COR24439736F>",
-        #     self.time_period is not None and (self.timestamp_label is not None and
-        #          self.timestamp_label != ""),
-        #     "a timestamp_label is required if a time_period is specified",
-        # )
-
         # If the time index is stored periodically, this can be represented as a
         # periodic index in pandas iff the start time and period are grounded in
-        # real datetime space. If they are purely numerica, they can be
+        # real datetime space. If they are purely numerical, they can be
         # converted to a set of point values. The only invalid combination is a
         # numeric start time and a timedelta duration.
         #
@@ -296,7 +287,7 @@ class SingleTimeSeries(DataObjectBase):
     ## Views ##
 
     def _as_pandas_ops(self, adf, include_timestamps: Union[None, bool] = False):
-        """operate on pandas-like object instead of strickly pandas"""
+        """operate on pandas-like object instead of strictly pandas"""
         backend_df = adf
 
         # if we want to include timestamps, but it is not already in the dataframe, we need to add
@@ -317,19 +308,37 @@ class SingleTimeSeries(DataObjectBase):
 
         return backend_df
 
-    def as_pandas(self, include_timestamps=None) -> "pd.DataFrame":
+    def as_pandas(self, include_timestamps: Optional[bool] = None) -> "pd.DataFrame":
         """Get the view of this timeseries as a pandas DataFrame
 
+        Args:
+            include_timestamps (bool, optional): Control the addition or removal of
+            timestamps. True will include timestamps, generating if needed, while False will
+            remove timestamps. Use None to returned what is available, leaving unchanged.
+            Defaults to None.
+
         Returns:
-            df:  pd.DataFrame
-                The view of the data as a pandas DataFrame
+            pd.DataFrame: The view of the data as a pandas DataFrame
         """
         backend_df = self._get_pd_df()[0]
         return self._as_pandas_ops(
             adf=backend_df, include_timestamps=include_timestamps
         )
 
-    def as_spark(self, include_timestamps=None) -> "pyspark.sql.DataFrame":
+    def as_spark(
+        self, include_timestamps: Optional[bool] = None
+    ) -> "pyspark.sql.DataFrame":
+        """Get the view of this timeseries as a spark DataFrame
+
+        Args:
+            include_timestamps (bool, optional): Control the addition or removal of
+            timestamps. True will include timestamps, generating if needed, while False will
+            remove timestamps. Use None to returned what is available, leaving unchanged.
+            Defaults to None.
+
+        Returns:
+            pyspark.sql.DataFrame: The view of the data as a spark DataFrame
+        """
         if not HAVE_PYSPARK:
             raise NotImplementedError(
                 "You must have pyspark installed for this to work!"

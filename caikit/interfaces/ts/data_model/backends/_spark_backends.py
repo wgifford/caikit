@@ -22,7 +22,7 @@ to do.
 """
 
 # Standard
-from typing import Any, Iterable, Optional, Tuple, Type, Union
+from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Type, Union
 
 # Third Party
 import pandas as pd
@@ -40,7 +40,10 @@ from .._single_timeseries import SingleTimeSeries
 from .base import MultiTimeSeriesBackendBase, TimeSeriesBackendBase
 from .dfcache import EnsureCached
 from .pandas_backends import PandasMultiTimeSeriesBackend, PandasTimeSeriesBackend
-from .util import mock_pd_groupby
+
+if TYPE_CHECKING:
+    # Local
+    from ..timeseries import TimeSeries
 
 log = alog.use_channel("SPBCK")
 error = error_handler.get(log)
@@ -56,10 +59,10 @@ class SparkMultiTimeSeriesBackend(MultiTimeSeriesBackendBase):
         ids: Optional[Union[Iterable[int], Iterable[str]]] = None,
         producer_id: Optional[Union[Tuple[str, str], ProducerId]] = None,
     ):
-        error.type_check("<COR77829913F>", pyspark.sql.DataFrame, data_frame=data_frame)
+        error.type_check("<COR77829913E>", pyspark.sql.DataFrame, data_frame=data_frame)
 
         # for param validation
-        _ = PandasMultiTimeSeriesBackend(
+        pd_mts = PandasMultiTimeSeriesBackend(
             data_frame=pd.DataFrame(columns=data_frame.columns),
             key_column=key_column,
             timestamp_column=timestamp_column,
@@ -74,7 +77,7 @@ class SparkMultiTimeSeriesBackend(MultiTimeSeriesBackendBase):
         self._key_column = key_column
         self._timestamp_column = timestamp_column
         # pylint: disable=duplicate-code
-        self._value_columns = self._value_columns = value_columns or [
+        self._value_columns = value_columns or [
             col
             for col in data_frame.columns
             if col != timestamp_column and col not in key_column
@@ -85,20 +88,13 @@ class SparkMultiTimeSeriesBackend(MultiTimeSeriesBackendBase):
             if isinstance(producer_id, ProducerId)
             else (ProducerId(*producer_id) if producer_id is not None else None)
         )
+        self._key_columns = pd_mts._key_columns
 
-    def get_attribute(
-        self, data_model_class: Type["MultiTimeSeries"], name: str
-    ) -> Any:
-        # pylint: disable=duplicate-code
-        if isinstance(self._key_column, str):
-            key_columns = [self._key_column]
-        else:
-            key_columns = self._key_column
-
+    def get_attribute(self, data_model_class: Type["TimeSeries"], name: str) -> Any:
         if name == "timeseries":
             result = []
 
-            if len(key_columns) == 0:
+            if len(self._key_columns) == 0:
                 with EnsureCached(self._pyspark_df) as _:
                     backend = SparkTimeSeriesBackend(
                         data_frame=self._pyspark_df,
@@ -109,7 +105,7 @@ class SparkMultiTimeSeriesBackend(MultiTimeSeriesBackendBase):
             else:
                 with EnsureCached(self._pyspark_df) as _:
                     for ids, spark_df in mock_pd_groupby(
-                        self._pyspark_df, by=key_columns
+                        self._pyspark_df, by=self._key_columns
                     ):
                         k = ids
                         if isinstance(k, (str, int)):
@@ -124,7 +120,7 @@ class SparkMultiTimeSeriesBackend(MultiTimeSeriesBackendBase):
             return result
 
         if name == "id_labels":
-            return key_columns
+            return self._key_columns
 
         # If requesting producer_id or ids, just return the stored value
         if name == "producer_id":
@@ -149,7 +145,7 @@ class SparkTimeSeriesBackend(TimeSeriesBackendBase):
     def __init__(
         self,
         data_frame: pyspark.sql.DataFrame,
-        timestamp_column: str = None,
+        timestamp_column: Optional[str] = None,
         value_columns: Optional[Iterable[str]] = None,
         ids: Optional[Iterable[int]] = None,
     ):
@@ -206,3 +202,20 @@ class SparkTimeSeriesBackend(TimeSeriesBackendBase):
             self._pdbackend_helper._timestamp_column,
             self._pdbackend_helper._value_columns,
         )
+
+
+def mock_pd_groupby(a_df_like, by: List[str], return_pandas_api=False):
+    """Roughly mocks the behavior of pandas groupBy but on a spark dataframe."""
+
+    distinct_keys = a_df_like.select(by).distinct().collect()
+    for dkey in distinct_keys:
+        adict = dkey.asDict()
+        filter_statement = ""
+        for k, v in adict.items():
+            filter_statement += f" {k} == '{v}' and"
+        if filter_statement.endswith("and"):
+            filter_statement = filter_statement[0:-3]
+        sub_df = a_df_like.filter(filter_statement)
+        value = tuple(adict.values())
+        value = value[0] if len(value) == 1 else value
+        yield value, sub_df.pandas_api() if return_pandas_api else sub_df

@@ -201,8 +201,17 @@ def _grpc_health_probe(
         )
         import grpc  # pylint: disable=import-outside-toplevel
 
+    # Server hostname to use unless using socket mode
     hostname = f"localhost:{port}"
-    if tls_key and tls_cert:
+    socket_file = get_config().runtime.grpc.unix_socket_path
+
+    # If available, use a unix socket
+    if socket_file and os.path.exists(os.path.dirname(socket_file)):
+        socket_address = f"unix://{socket_file}"
+        log.debug("Probing gRPC server over unix socket: %s", socket_file)
+        channel = grpc.insecure_channel(socket_address)
+
+    elif tls_key and tls_cert:
         tls_server_key = bytes(_load_secret(tls_key), "utf-8")
         tls_server_cert = bytes(_load_secret(tls_cert), "utf-8")
         if client_ca:
@@ -217,6 +226,14 @@ def _grpc_health_probe(
             credentials = grpc.ssl_channel_credentials(
                 root_certificates=tls_server_cert,
             )
+
+        # NOTE: If the server's certificate does not have 'localhost' in it,
+        #   this will cause certificate validation errors and fail. The original
+        #   workaround for this was to parse the cert's SANs and use hostname
+        #   overrides, but that requires a full cryptographic PEM parser which
+        #   is a security-sensitive dependency to pull that we want to avoid.
+        #   Instead, the workaround is to use the unix socket server option
+        #   above.
         channel = grpc.secure_channel(hostname, credentials=credentials)
     else:
         log.debug("Probing INSECURE gRPC server")
